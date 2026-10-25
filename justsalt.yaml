@@ -435,10 +435,19 @@ binary_sensor:
     lambda: |-
       return id(derniere_trame_ms) != 0 && (millis() - id(derniere_trame_ms)) < 30000;
 
+  # Présence : l'électrolyseur n'émet plus d'annonces quand il est connecté, donc la
+  # détection par annonces seule repasserait à OFF au bout de 5 min de liaison.
+  # « Visible » = liaison établie OU annonces reçues récemment.
   - platform: ble_presence
+    id: presence_annonces
     mac_address: ${mac_justsalt}
+    internal: true
+  - platform: template
     name: "Électrolyseur visible"
+    device_class: presence
     entity_category: diagnostic
+    lambda: |-
+      return id(justsalt)->connected() || id(presence_annonces).state;
 
 text_sensor:
   - platform: version
@@ -495,9 +504,14 @@ sensor:
     icon: mdi:bluetooth-settings
     accuracy_decimals: 0
     entity_category: diagnostic
-  - platform: ble_rssi
-    mac_address: ${mac_justsalt}
+  # Signal de la liaison établie, mesuré par l'ESP. (La plateforme ble_rssi, basée sur les
+  # annonces, restait « inconnue » : l'électrolyseur n'émet plus d'annonces une fois connecté.)
+  - platform: ble_client
+    type: rssi
+    ble_client_id: justsalt
     name: "Signal Bluetooth électrolyseur"
+    update_interval: 60s
+    entity_category: diagnostic
 
   - platform: template
     id: ph_sensor
