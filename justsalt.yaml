@@ -22,6 +22,8 @@ esphome:
       - lambda: |-
           int n = esp_ble_get_bond_device_num();
           ESP_LOGI("justsalt", "Au démarrage : %d appairage(s) mémorisé(s) dans l'ESP", n);
+          id(appairages_demarrage).publish_state(n);
+          id(appairages_esp).publish_state(n);
           if (n > 0) {
             std::vector<esp_ble_bond_dev_t> liste(n);
             if (esp_ble_get_bond_device_list(&n, liste.data()) == ESP_OK) {
@@ -99,11 +101,33 @@ ble_client:
             int n = esp_ble_get_bond_device_num();
             ESP_LOGI("justsalt", "Connecté (liaison %s), %d appairage(s) mémorisé(s) dans l'ESP",
                      id(justsalt)->is_paired() ? "déjà chiffrée" : "pas encore chiffrée", n);
+            id(appairages_esp).publish_state(n);
+        # Filet de sécurité : si l'électrolyseur n'a pas réclamé la sécurisation au bout de
+        # 3 s (cas observé après une remise sous tension), l'ESP chiffre lui-même la liaison
+        # avec sa clé mémorisée. Le délai évite toute collision avec la demande de
+        # l'électrolyseur, qui arrive normalement dès l'ouverture de la connexion.
+        - delay: 3s
+        - if:
+            condition:
+              lambda: "return id(justsalt)->connected() && !id(justsalt)->is_paired() && esp_ble_get_bond_device_num() > 0;"
+            then:
+              - logger.log:
+                  level: INFO
+                  format: "Pas de demande de sécurisation de l'électrolyseur : chiffrement avec la clé mémorisée"
+              - lambda: "id(justsalt)->pair();"
+              - delay: 4s
+              - lambda: |-
+                  if (id(justsalt)->is_paired()) {
+                    ESP_LOGI("justsalt", "Liaison chiffrée avec la clé mémorisée");
+                  } else if (id(justsalt)->connected()) {
+                    ESP_LOGW("justsalt", "Chiffrement refusé : l'électrolyseur ne reconnaît plus la clé, refaire l'appairage");
+                  }
     on_disconnect:
       then:
         - lambda: |-
             int n = esp_ble_get_bond_device_num();
             ESP_LOGI("justsalt", "Électrolyseur déconnecté, %d appairage(s) mémorisé(s) dans l'ESP", n);
+            id(appairages_esp).publish_state(n);
 
 # Pas de reconnexion périodique volontaire : inutile, l'électrolyseur envoie en continu
 # les valeurs qui changent, et la trame complète à chaque (re)connexion.
@@ -367,6 +391,27 @@ binary_sensor:
     filters:
       - delayed_off: 30s
 
+  # Alarmes : registre 0x90 (8 octets). Correspondance des bits relevée sur le forum
+  # HACF (Cyber_Chris), dernier octet : 0x02 manque d'eau, 0x20 injection pH,
+  # 0x40 étalonnage pH. « Alarme électrolyseur » couvre toute valeur non nulle,
+  # au cas où une alarme utiliserait un autre bit.
+  - platform: template
+    id: alarme_globale
+    name: "Alarme électrolyseur"
+    device_class: problem
+  - platform: template
+    id: alarme_manque_eau
+    name: "Alarme manque d'eau"
+    device_class: problem
+  - platform: template
+    id: alarme_injection_ph
+    name: "Alarme injection pH"
+    device_class: problem
+  - platform: template
+    id: alarme_etalonnage_ph
+    name: "Alarme étalonnage pH"
+    device_class: problem
+
   # Injection pH- en cours : bit 0x40 du registre d'état 0x93 (00.80 -> 00.C0),
   # manuelle ou déclenchée par la régulation automatique
   - platform: template
@@ -417,6 +462,12 @@ text_sensor:
     name: "Numéro de série"
     icon: mdi:barcode
     entity_category: diagnostic
+  # Valeur brute du registre d'alarmes 0x90, pour identifier de nouveaux bits
+  - platform: template
+    id: alarmes_brut
+    name: "Alarmes (valeur brute)"
+    icon: mdi:alert-circle-outline
+    entity_category: diagnostic
 
 sensor:
   - platform: wifi_signal
@@ -424,6 +475,20 @@ sensor:
     update_interval: 60s
   - platform: uptime
     name: "Uptime"
+
+  # Diagnostic de l'appairage, visible dans l'historique HA (sans avoir à surveiller les logs)
+  - platform: template
+    id: appairages_demarrage
+    name: "Appairages mémorisés au démarrage"
+    icon: mdi:bluetooth-settings
+    accuracy_decimals: 0
+    entity_category: diagnostic
+  - platform: template
+    id: appairages_esp
+    name: "Appairages mémorisés"
+    icon: mdi:bluetooth-settings
+    accuracy_decimals: 0
+    entity_category: diagnostic
   - platform: ble_rssi
     mac_address: ${mac_justsalt}
     name: "Signal Bluetooth électrolyseur"
@@ -446,6 +511,19 @@ sensor:
     entity_category: diagnostic
     filters:
       - throttle_average: 60s
+  # 0x0C ÷ 10 : courant de cellule probable (champ « cell_current » de l'appli d'après
+  # le forum) ; tombe à 0 quand la cellule s'arrête.
+  - platform: template
+    id: courant_cellule
+    name: "Courant cellule (estimé)"
+    icon: mdi:current-dc
+    unit_of_measurement: A
+    device_class: current
+    state_class: measurement
+    accuracy_decimals: 1
+    entity_category: diagnostic
+    filters:
+      - throttle_average: 60s   # varie légèrement chaque seconde
   - platform: template
     id: boost_restant
     name: "Boost : temps restant"
@@ -568,7 +646,23 @@ sensor:
           case 0x0A: break;
           case 0x28: if (len >= 2) pub(id(sel_sensor), u16 == 0 ? NAN : u16 / 1000.0f); break;
           case 0x0B: pub(id(temp_boitier), x[d]); break;
-          case 0x0C: pubb(id(production_en_cours), x[d] > 0); break;
+          case 0x0C:
+            pubb(id(production_en_cours), x[d] > 0);
+            pub(id(courant_cellule), x[d] / 10.0f);
+            break;
+          case 0x90:
+            if (len >= 8) {
+              bool alarme = false;
+              for (int k = 0; k < 8; k++) if (x[d + k]) alarme = true;
+              const uint8_t bits = x[d + 7];
+              pubb(id(alarme_globale), alarme);
+              pubb(id(alarme_manque_eau), (bits & 0x02) != 0);
+              pubb(id(alarme_injection_ph), (bits & 0x20) != 0);
+              pubb(id(alarme_etalonnage_ph), (bits & 0x40) != 0);
+              pubt(id(alarmes_brut), format_hex_pretty(&x[d], 8, '.', false));
+              if (alarme) ESP_LOGW("justsalt", "Alarme électrolyseur : %s", format_hex_pretty(&x[d], 8, '.', false).c_str());
+            }
+            break;
           case 0x03: pub(id(production_effective), x[d]); break;      // 80 = consigne, 125 en boost
           case 0x67: if (len >= 2) pub(id(boost_restant), u16); break;  // minutes, 0 hors boost
           case 0x93:

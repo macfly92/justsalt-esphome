@@ -58,7 +58,7 @@ R = lecture, W = écriture (même ID), C = commande en écriture seule.
 | `09` | 2 | R | Température de l'eau × 10 (°C) |
 | `0A` | 1 | R | Sel × 10 (g/L) ; **0 = pas de mesure** (cellule à l'arrêt) |
 | `0B` | 1 | R | Lié à la production : 0 à l'arrêt, ~37 en production, décroît lentement après l'arrêt (grandeur filtrée ou thermique ?) |
-| `0C` | 1 | R | Courant ou production instantanée de la cellule (?) : 0 à l'arrêt, ~90-150 en production |
+| `0C` | 1 | R | Courant de cellule × 10 probable (champ « cell_current » de l'appli d'après le forum) : 0 à l'arrêt, ~90-150 en production |
 | `0D` | 2 | R | ? |
 | `0E` | 2 | R | Heures de fonctionnement |
 | `0F` | 2 | R | Compteur incrémenté chaque minute |
@@ -69,7 +69,7 @@ R = lecture, W = écriture (même ID), C = commande en écriture seule.
 | `29` | 1 | R | Unité d'affichage du sel : 3 = g/L, sinon ppm (forum) |
 | `2A` | 1 | R | Unité d'affichage de la température : 1 = °C, sinon °F (forum) |
 | `67` | 2 | R | **Temps restant du boost** (minutes), 0 hors boost ✅ |
-| `90` | 8 | R | Alarmes (forum) : `…20` = alarme injection pH ; valeurs relevées 2 = manque d'eau, 40 = étalonnage pH |
+| `90` | 8 | R | Alarmes (forum), bits du dernier octet : `0x02` manque d'eau, `0x20` injection pH, `0x40` étalonnage pH. Tout à zéro sans alarme |
 | `92` | 1 | R | Code d'événement transitoire, remis à 0 après environ 1 s : `07` boost, `09` injection manuelle, `0B` régulation réactivée |
 | `93` | 2 | R | **Registre d'état** ✅ : bit `0x0010` = boost en cours, bit `0x0040` = injection pH- en cours. Bit `0x0080` présent en permanence sur le Duo testé, associé à l'électrolyse sur un autre modèle (forum) ; bit `0x0100` vu au démarrage de la pompe (forum) |
 | `95` | 4 | R | Code ID / configuration (change avec certains réglages) |

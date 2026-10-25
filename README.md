@@ -24,7 +24,8 @@ D'autres générations ou modèles (avec sonde ORP notamment) utilisent le même
 - Injection pH- en cours (manuelle ou automatique)
 - Boost : état et temps restant
 - Consignes, heures de fonctionnement, date d'étalonnage pH, version, numéro de série
-- Diagnostic : signal Bluetooth (des deux côtés), signal Wi-Fi, réception des données
+- **Alarmes** : manque d'eau, injection pH, étalonnage pH, plus une alarme générale et la valeur brute du registre (correspondance des bits reprise du forum, à confirmer sur d'autres modèles)
+- Diagnostic : courant de cellule (estimé), signal Bluetooth (des deux côtés), signal Wi-Fi, réception des données
 
 **Commandes**
 - Consigne pH, consigne de production, taux d'acide, volume de la piscine, période d'inversion
@@ -82,9 +83,8 @@ Format des trames, liste des registres, commandes et notes sur l'appairage : **[
 
 ## Remerciements
 
-- **Ricky_D** ([Ricky197503/haJustsalt](https://github.com/Ricky197503/haJustsalt)) et les contributeurs du fil HACF [Électrolyseur E-Pool Technologie Justsalt](https://forum.hacf.fr/t/electrolyseur-e-pool-technologie-justsalt/24718), pour le décodage initial du protocole et les premières versions ESPHome.
+- **Ricky_D** ([Ricky197503/haJustsalt](https://github.com/Ricky197503/haJustsalt)), **Cyber_Chris** et les contributeurs des fils HACF [Électrolyseur E-Pool Technologie Justsalt](https://forum.hacf.fr/t/electrolyseur-e-pool-technologie-justsalt/24718) et [Electrolyser Bluetooth Justsalt, Racer](https://forum.hacf.fr/t/electrolyser-bluetooth-justsalt-racer/81540), pour le décodage du protocole et les versions ESPHome.
 - Ce dépôt ajoute notamment : la commande du boost (`0x66`), l'injection manuelle de pH- (`0x6B`), la régulation pH (`0x51`), le registre d'état `0x93`, et la correction des problèmes d'appairage.
-- **L'IA**
 
 ## Licence
 
