@@ -61,7 +61,7 @@ R = lecture, W = écriture (même ID), C = commande en écriture seule.
 | `0C` | 1 | R | Courant de cellule × 10 probable (champ « cell_current » de l'appli d'après le forum) : 0 à l'arrêt, ~90-150 en production |
 | `0D` | 2 | R | ? |
 | `0E` | 2 | R | Heures de fonctionnement |
-| `0F` | 2 | R | Compteur incrémenté chaque minute |
+| `0F` | 2 | R | Minutes de fonctionnement cumulées sur la journée (champ « filtration_time_mn_curr_day » ou « electrolysis_counter_mn_curr_day » de l'appli ?) : +1 par minute, ne repart pas de 0 au redémarrage de la pompe ; remise à zéro quotidienne à confirmer |
 | `10` | 2 | R | ? |
 | `12` | 4 | R | Date d'étalonnage pH : `xx JJ MM AA` |
 | `1F` | 2 | R | Température de l'eau en °F × 10 (forum ; vérifié : 620 = 62,0 °F ≈ 16,7 °C pour 17,0 °C en `09`) |

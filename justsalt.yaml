@@ -576,12 +576,15 @@ sensor:
     state_class: total_increasing
     entity_category: diagnostic
   - platform: template
+    # 0x0F : minutes de fonctionnement cumulées sur la journée (l'électrolyseur étant
+    # alimenté avec la filtration, c'est aussi le temps de filtration du jour).
+    # Ne repart pas de 0 à chaque démarrage de la pompe ; remise à zéro quotidienne supposée.
     id: minutes_fonct
-    name: "Minutes de fonctionnement"
-    icon: mdi:counter
+    name: "Filtration aujourd'hui"
+    icon: mdi:pump
     unit_of_measurement: min
-    entity_category: diagnostic
-    disabled_by_default: true
+    device_class: duration
+    state_class: total_increasing
 
   # Réception et décodage des trames.
   # Format : 3 octets d'en-tête, puis des blocs [ID][taille][données...]
