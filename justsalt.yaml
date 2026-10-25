@@ -1,0 +1,620 @@
+# Passerelle Bluetooth -> Home Assistant pour électrolyseur JustSalt (E-Pool / Pool Technologie)
+# Testé sur un JustSalt Duo de 4e génération (nom Bluetooth « GEN_V4 », logiciel 03.03).
+#
+# S'appuie sur les travaux de Ricky_D et des contributeurs du fil HACF :
+# https://forum.hacf.fr/t/electrolyseur-e-pool-technologie-justsalt/24718
+# Protocole obtenu par rétro-ingénierie : non officiel, sans aucune garantie.
+# Détail des registres : voir PROTOCOL.md
+
+substitutions:
+  mac_justsalt: "XX:XX:XX:XX:XX:XX"   # <-- adresse Bluetooth de VOTRE électrolyseur (voir README)
+  service_uuid: "09912756-7b32-4629-aeb1-b309d9a338ae"
+  char_notify_uuid: "ef785c24-22bb-463d-b651-0b7445ba091c"
+  char_write_uuid: "4d32c5e5-2bb5-45c6-8c89-6f59bb3930d2"
+
+esphome:
+  name: justsalt
+  friendly_name: Électrolyseur
+  on_boot:
+    priority: -100   # une fois la pile Bluetooth démarrée
+    then:
+      # Diagnostic : l'ESP a-t-il conservé sa clé d'appairage après le redémarrage ?
+      - lambda: |-
+          int n = esp_ble_get_bond_device_num();
+          ESP_LOGI("justsalt", "Au démarrage : %d appairage(s) mémorisé(s) dans l'ESP", n);
+          if (n > 0) {
+            std::vector<esp_ble_bond_dev_t> liste(n);
+            if (esp_ble_get_bond_device_list(&n, liste.data()) == ESP_OK) {
+              for (int i = 0; i < n; i++) {
+                const uint8_t *a = liste[i].bd_addr;
+                ESP_LOGI("justsalt", "  appairage %d : %02X:%02X:%02X:%02X:%02X:%02X", i, a[0], a[1], a[2], a[3], a[4], a[5]);
+              }
+            }
+          }
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf          # plus stable que arduino selon les retours du forum
+
+logger:
+  level: INFO              # DEBUG pour revoir les trames brutes
+
+api:
+  encryption:
+    key: !secret api_key
+  # Action d'expérimentation, appelable depuis HA (Developer tools > Actions) :
+  # écrit n'importe quel registre (si le verrou des commandes n'est pas activé).
+  actions:
+    - action: ecrire_registre
+      variables:
+        reg: int
+        taille: int
+        valeur: int
+      then:
+        - script.execute:
+            id: ecrire_consigne
+            reg: !lambda "return reg;"
+            taille: !lambda "return taille;"
+            valeur: !lambda "return valeur;"
+
+ota:
+  - platform: esphome
+    encryption: {}         # réutilise la clé de l'API
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Justsalt Fallback"
+    password: !secret ap_password
+
+captive_portal:
+
+globals:
+  - id: derniere_trame_ms
+    type: uint32_t
+    initial_value: "0"
+
+# ---------------------------------------------------------------------------
+# Bluetooth
+# ---------------------------------------------------------------------------
+esp32_ble:
+  # Demander un appairage AVEC mémorisation des clés (bonding), en Secure Connections.
+  # Sans ça, l'appairage n'est que temporaire et la clé est rejetée à la connexion suivante.
+  auth_req_mode: sc_bond
+
+ble_client:
+  - mac_address: ${mac_justsalt}
+    id: justsalt
+    auto_connect: true
+    # IMPORTANT : ne PAS déclencher d'appairage depuis l'ESP (pas de pair()).
+    # L'électrolyseur réclame lui-même la sécurisation à chaque connexion (Security
+    # Request) et ESPHome y répond automatiquement, comme le fait l'appli officielle.
+    # Un appairage lancé en parallèle par l'ESP provoquait des collisions et des
+    # appairages non persistants (« Deleting unpaired device » à la déconnexion).
+    on_connect:
+      then:
+        - lambda: |-
+            int n = esp_ble_get_bond_device_num();
+            ESP_LOGI("justsalt", "Connecté (liaison %s), %d appairage(s) mémorisé(s) dans l'ESP",
+                     id(justsalt)->is_paired() ? "déjà chiffrée" : "pas encore chiffrée", n);
+    on_disconnect:
+      then:
+        - lambda: |-
+            int n = esp_ble_get_bond_device_num();
+            ESP_LOGI("justsalt", "Électrolyseur déconnecté, %d appairage(s) mémorisé(s) dans l'ESP", n);
+
+# Pas de reconnexion périodique volontaire : inutile, l'électrolyseur envoie en continu
+# les valeurs qui changent, et la trame complète à chaque (re)connexion.
+
+# ---------------------------------------------------------------------------
+# Écriture des consignes (une seule routine pour toutes)
+# ---------------------------------------------------------------------------
+script:
+  - id: ecrire_consigne
+    mode: queued
+    parameters:
+      reg: int
+      taille: int
+      valeur: int
+    then:
+      - if:
+          condition:
+            switch.is_off: verrou_commandes
+          then:
+            - logger.log:
+                level: INFO
+                format: "Écriture registre 0x%02X = %d"
+                args: [reg, valeur]
+            - ble_client.ble_write:
+                id: justsalt
+                service_uuid: ${service_uuid}
+                characteristic_uuid: ${char_write_uuid}
+                value: !lambda |-
+                  // Format relevé dans les captures de l'appli :
+                  // 00 | longueur (5 + taille) | 03 | registre | taille | données… | FF FF | 00…
+                  std::vector<uint8_t> t(80, 0x00);
+                  t[1] = 5 + taille; t[2] = 0x03;
+                  t[3] = reg; t[4] = taille;
+                  if (taille == 1) {
+                    t[5] = valeur & 0xFF; t[6] = 0xFF; t[7] = 0xFF;
+                  } else {
+                    t[5] = (valeur >> 8) & 0xFF; t[6] = valeur & 0xFF; t[7] = 0xFF; t[8] = 0xFF;
+                  }
+                  return t;
+          else:
+            - logger.log:
+                level: WARN
+                format: "Écriture bloquée (verrou des commandes activé), registre 0x%02X"
+                args: [reg]
+
+select:
+  # Durées choisies dans HA, utilisées par les interrupteurs « Boost » et « Injection pH- ».
+  - platform: template
+    id: duree_boost
+    name: "Durée du boost"
+    icon: mdi:timer-cog-outline
+    options: ["12 h", "24 h"]
+    initial_option: "24 h"
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: duree_injection
+    name: "Durée injection pH-"
+    icon: mdi:timer-cog-outline
+    options: ["30 s", "1 min", "2 min", "3 min", "5 min"]
+    initial_option: "1 min"
+    optimistic: true
+    restore_value: true
+
+button:
+  # Injection manuelle de pH- : registre 0x6B, 1 octet 02 = pause / reprise
+  - platform: template
+    name: "Injection pH- : pause ou reprise"
+    icon: mdi:pause
+    on_press:
+      - script.execute:
+          id: ecrire_consigne
+          reg: 0x6B
+          taille: 1
+          valeur: 2
+
+  # Efface la clé d'appairage côté ESP, pour repartir proprement avant un nouvel appairage
+  - platform: template
+    name: "Oublier l'appairage Bluetooth"
+    icon: mdi:bluetooth-off
+    entity_category: config
+    on_press:
+      - ble_client.remove_bond:
+          id: justsalt
+
+switch:
+  - platform: template
+    # Verrou des commandes : désactivé par défaut (commandes autorisées).
+    # Activé, il bloque toute écriture vers l'électrolyseur ; son état survit aux redémarrages.
+    id: verrou_commandes
+    name: "Verrou des commandes"
+    icon: mdi:lock
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+
+  - platform: ble_client
+    id: ble_switch_com
+    ble_client_id: justsalt
+    name: "Liaison Bluetooth"
+    entity_category: config
+
+  - platform: restart
+    name: "Redémarrer la passerelle"
+
+  # Boost : registre 0x66 = durée en heures (12 ou 24), 0 = arrêt.
+  # L'état affiché est celui de l'électrolyseur (bit 0x10 du registre 0x93).
+  - platform: template
+    id: sw_boost
+    restore_mode: DISABLED   # n'agit pas au démarrage ; l'état vient de l'électrolyseur
+    name: "Boost"
+    icon: mdi:rocket-launch
+    turn_on_action:
+      - script.execute:
+          id: ecrire_consigne
+          reg: 0x66
+          taille: 1
+          valeur: !lambda "return id(duree_boost).active_index().value_or(1) == 0 ? 12 : 24;"
+    turn_off_action:
+      - script.execute:
+          id: ecrire_consigne
+          reg: 0x66
+          taille: 1
+          valeur: 0
+
+  # Injection manuelle de pH- : registre 0x6B
+  #   2 octets [01][n] = démarrer pour n × 30 s (vérifié : 30 s, 1, 2, 3 et 5 min)
+  #   1 octet  00      = annuler
+  # L'état affiché est celui de l'électrolyseur (bit 0x40 du registre 0x93) : il passe
+  # aussi à ON pendant les injections de la régulation automatique.
+  - platform: template
+    id: sw_injection
+    restore_mode: DISABLED   # n'agit pas au démarrage ; l'état vient de l'électrolyseur
+    name: "Injection pH-"
+    icon: mdi:needle
+    turn_on_action:
+      - script.execute:
+          id: ecrire_consigne
+          reg: 0x6B
+          taille: 2
+          valeur: !lambda |-
+            static const int tranches_30s[] = {1, 2, 4, 6, 10};   // 30 s, 1, 2, 3, 5 min
+            size_t i = id(duree_injection).active_index().value_or(1);
+            if (i > 4) i = 1;
+            return 0x0100 | tranches_30s[i];
+    turn_off_action:
+      - script.execute:
+          id: ecrire_consigne
+          reg: 0x6B
+          taille: 1
+          valeur: 0
+
+  # Régulation automatique du pH : registre 0x51 (1 = active, 0 = arrêtée)
+  - platform: template
+    id: regulation_ph
+    restore_mode: DISABLED   # n'agit pas au démarrage ; l'état vient de l'électrolyseur
+    name: "Régulation pH automatique"
+    icon: mdi:ph
+    turn_on_action:
+      - script.execute:
+          id: ecrire_consigne
+          reg: 0x51
+          taille: 1
+          valeur: 1
+    turn_off_action:
+      - script.execute:
+          id: ecrire_consigne
+          reg: 0x51
+          taille: 1
+          valeur: 0
+
+# set_action (et non on_value) : l'écriture n'a lieu QUE lorsque la valeur est
+# modifiée depuis HA, pas à chaque trame reçue de l'électrolyseur.
+number:
+  - platform: template
+    id: consigne_ph
+    name: "Consigne pH"
+    icon: mdi:ph
+    min_value: 6.8
+    max_value: 7.6
+    step: 0.1
+    set_action:
+      - script.execute:
+          id: ecrire_consigne
+          reg: 0x30
+          taille: 1
+          valeur: !lambda "return lroundf(x * 10);"
+
+  - platform: template
+    id: consigne_prod
+    name: "Consigne production"
+    icon: mdi:cog-outline
+    unit_of_measurement: "%"
+    min_value: 10
+    max_value: 100
+    step: 1
+    set_action:
+      - script.execute:
+          id: ecrire_consigne
+          reg: 0x33
+          taille: 1
+          valeur: !lambda "return lroundf(x);"
+
+  - platform: template
+    id: consigne_acide
+    name: "Taux d'acide"
+    icon: mdi:skull-crossbones-outline
+    unit_of_measurement: "%"
+    min_value: 5
+    max_value: 55
+    step: 1
+    entity_category: config
+    set_action:
+      - script.execute:
+          id: ecrire_consigne
+          reg: 0x32
+          taille: 1
+          valeur: !lambda "return lroundf(x);"
+
+  - platform: template
+    id: consigne_vol
+    name: "Volume piscine"
+    icon: mdi:cup-water
+    unit_of_measurement: m³
+    min_value: 10
+    max_value: 200
+    step: 10
+    entity_category: config
+    set_action:
+      - script.execute:
+          id: ecrire_consigne
+          reg: 0x11
+          taille: 2
+          valeur: !lambda "return lroundf(x);"
+
+  - platform: template
+    id: consigne_inversion
+    name: "Période d'inversion"
+    icon: mdi:swap-horizontal
+    unit_of_measurement: h
+    min_value: 2
+    max_value: 24
+    step: 1
+    entity_category: config
+    set_action:
+      - script.execute:
+          id: ecrire_consigne
+          reg: 0x39
+          taille: 1
+          valeur: !lambda "return lroundf(x);"
+
+# ---------------------------------------------------------------------------
+# Lecture
+# ---------------------------------------------------------------------------
+binary_sensor:
+  # Déduit de l'ID 0x0C : 0 quand la cellule est à l'arrêt, ~90-100 en production
+  - platform: template
+    id: production_en_cours
+    name: "Production de chlore en cours (déduit)"
+    icon: mdi:flash
+    filters:
+      - delayed_off: 30s
+
+  # Injection pH- en cours : bit 0x40 du registre d'état 0x93 (00.80 -> 00.C0),
+  # manuelle ou déclenchée par la régulation automatique
+  - platform: template
+    id: injection_ph
+    name: "Injection pH- en cours"
+    icon: mdi:needle
+
+  # Vrai si l'électrolyseur a envoyé des données dans les 30 dernières secondes
+  # (il envoie au moins une petite trame par seconde quand la liaison fonctionne).
+  # Sert à détecter dans HA un appairage perdu, ex. après une coupure de la filtration.
+  - platform: template
+    id: donnees_recues
+    name: "Données électrolyseur reçues"
+    device_class: connectivity
+    lambda: |-
+      return id(derniere_trame_ms) != 0 && (millis() - id(derniere_trame_ms)) < 30000;
+
+  - platform: ble_presence
+    mac_address: ${mac_justsalt}
+    name: "Électrolyseur visible"
+    entity_category: diagnostic
+
+text_sensor:
+  - platform: version
+    name: "Version ESPHome"
+    hide_timestamp: true
+  - platform: template
+    id: date_etal_ph
+    name: "Date étalonnage pH"
+    icon: mdi:calendar-check
+    entity_category: diagnostic
+  - platform: template
+    id: id_code
+    name: "Code ID"
+    icon: mdi:barcode
+    entity_category: diagnostic
+  - platform: template
+    id: version_soft
+    name: "Version logiciel électrolyseur"
+    icon: mdi:qrcode
+    entity_category: diagnostic
+  - platform: template
+    id: nom_bt
+    name: "Nom Bluetooth"
+    entity_category: diagnostic
+  - platform: template
+    id: num_serie
+    name: "Numéro de série"
+    icon: mdi:barcode
+    entity_category: diagnostic
+
+sensor:
+  - platform: wifi_signal
+    name: "Signal Wi-Fi"
+    update_interval: 60s
+  - platform: uptime
+    name: "Uptime"
+  - platform: ble_rssi
+    mac_address: ${mac_justsalt}
+    name: "Signal Bluetooth électrolyseur"
+
+  - platform: template
+    id: ph_sensor
+    name: "pH"
+    icon: mdi:ph
+    unit_of_measurement: pH
+    accuracy_decimals: 2
+    state_class: measurement
+  # ID 0xB0, envoyé chaque seconde : vraisemblablement le niveau de réception
+  # Bluetooth mesuré par l'électrolyseur (valeurs cohérentes avec le RSSI de l'ESP).
+  - platform: template
+    id: rssi_vu_par_electrolyseur
+    name: "Signal Bluetooth vu par l'électrolyseur (supposé)"
+    unit_of_measurement: dBm
+    device_class: signal_strength
+    state_class: measurement
+    entity_category: diagnostic
+    filters:
+      - throttle_average: 60s
+  - platform: template
+    id: boost_restant
+    name: "Boost : temps restant"
+    icon: mdi:timer-outline
+    unit_of_measurement: min
+    accuracy_decimals: 0
+  - platform: template
+    id: production_effective
+    name: "Production effective"
+    icon: mdi:flash
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    state_class: measurement
+  - platform: template
+    id: temp_eau
+    name: "Température eau"
+    unit_of_measurement: °C
+    device_class: temperature
+    accuracy_decimals: 1
+    state_class: measurement
+  - platform: template
+    id: sel_sensor
+    name: "Sel"
+    icon: mdi:water-opacity
+    unit_of_measurement: g/L
+    accuracy_decimals: 2
+    filters:
+      - throttle_average: 5min   # la mesure oscille d'un dixième toutes les ~10 s
+    state_class: measurement
+  - platform: template
+    id: temp_boitier
+    name: "Température boîtier (supposée)"
+    unit_of_measurement: °C
+    device_class: temperature
+    state_class: measurement
+    disabled_by_default: true
+    filters:
+      - throttle_average: 60s   # oscille de ±1 chaque seconde en production
+  - platform: template
+    id: heures_fonct
+    name: "Heures de fonctionnement"
+    icon: mdi:timer-sand
+    unit_of_measurement: h
+    state_class: total_increasing
+    entity_category: diagnostic
+  - platform: template
+    id: minutes_fonct
+    name: "Minutes de fonctionnement"
+    icon: mdi:counter
+    unit_of_measurement: min
+    entity_category: diagnostic
+    disabled_by_default: true
+
+  # Réception et décodage des trames.
+  # Format : 3 octets d'en-tête, puis des blocs [ID][taille][données...]
+  - platform: ble_client
+    ble_client_id: justsalt
+    id: trame_rx
+    name: "Réception trames"
+    internal: true
+    type: characteristic
+    service_uuid: ${service_uuid}
+    characteristic_uuid: ${char_notify_uuid}
+    notify: true
+    lambda: |-
+      const size_t n = x.size();
+      id(derniere_trame_ms) = millis();
+      // Les petites trames envoyées chaque seconde (0x0B, 0x0C, 0xB0) ne sont journalisées qu'en VERBOSE.
+      if (n > 20) {
+        ESP_LOGD("justsalt", "Trame %u octets : %s", (unsigned) n, format_hex_pretty(x).c_str());
+      } else {
+        ESP_LOGV("justsalt", "Trame %u octets : %s", (unsigned) n, format_hex_pretty(x).c_str());
+      }
+
+      // Ne publier que ce qui change : l'envoi de tout à chaque trame ralentissait l'ESP.
+      auto pub  = [](sensor::Sensor *s, float v) { if (std::isnan(s->state) || s->state != v) s->publish_state(v); };
+      auto pubn = [](number::Number *s, float v) { if (std::isnan(s->state) || fabsf(s->state - v) > 0.001f) s->publish_state(v); };
+      auto pubb = [](binary_sensor::BinarySensor *s, bool v) { if (!s->has_state() || s->state != v) s->publish_state(v); };
+      auto pubt = [](text_sensor::TextSensor *s, const std::string &v) { if (!s->has_state() || s->state != v) s->publish_state(v); };
+
+      size_t i = 3;
+      while (i + 1 < n) {
+        const uint8_t key = x[i];
+        const uint8_t len = x[i + 1];
+        const size_t d = i + 2;
+        if (d + len > n) {
+          ESP_LOGW("justsalt", "Bloc tronqué (ID 0x%02X), trame ignorée à partir d'ici", key);
+          break;
+        }
+        const uint16_t u16 = len >= 2 ? ((x[d] << 8) | x[d + 1]) : (len == 1 ? x[d] : 0);
+        char buf[24];
+
+        // Détecteur de changements (rétro-ingénierie) : journalise à INFO toute valeur qui
+        // change, sauf celles qui bougent en permanence. Pratique pour identifier de
+        // nouveaux registres en manipulant le boîtier ou l'appli.
+        {
+          static std::string precedent[256];
+          static const uint8_t bruyants[] = {0x01, 0x02, 0x0A, 0x28, 0x0B, 0x0C, 0x0F, 0x1F, 0x67, 0xB0, 0xD2, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5};
+          bool bruyant = false;
+          for (uint8_t b : bruyants) if (b == key) bruyant = true;
+          std::string actuel = len ? format_hex_pretty(&x[d], len, '.', false) : std::string("-");
+          if (!bruyant && precedent[key] != actuel) {
+            if (precedent[key].empty()) {
+              ESP_LOGD("justsalt", "ID 0x%02X initial : %s", key, actuel.c_str());
+            } else {
+              ESP_LOGI("justsalt", "ID 0x%02X a changé : %s -> %s", key, precedent[key].c_str(), actuel.c_str());
+            }
+            precedent[key] = actuel;
+          }
+        }
+
+        switch (key) {
+          // 0x01 = pH arrondi au dixième ; 0x02 = même pH au centième (720 -> 7,20).
+          // On n'utilise que 0x02, plus précis.
+          case 0x01: break;
+          case 0x02: if (len >= 2) pub(id(ph_sensor), u16 / 100.0f); break;
+          case 0x09: pub(id(temp_eau), u16 / 10.0f); break;
+          // Sel : 0x0A au dixième (2E = 4,6 g/L), 0x28 en mg/L (11F8 = 4600). On prend 0x28, plus fin.
+          // 0 = pas de mesure (cellule à l'arrêt) : on publie "inconnu" plutôt que 0 g/L.
+          case 0x0A: break;
+          case 0x28: if (len >= 2) pub(id(sel_sensor), u16 == 0 ? NAN : u16 / 1000.0f); break;
+          case 0x0B: pub(id(temp_boitier), x[d]); break;
+          case 0x0C: pubb(id(production_en_cours), x[d] > 0); break;
+          case 0x03: pub(id(production_effective), x[d]); break;      // 80 = consigne, 125 en boost
+          case 0x67: if (len >= 2) pub(id(boost_restant), u16); break;  // minutes, 0 hors boost
+          case 0x93:
+            if (len >= 2) {
+              const bool boost = (u16 & 0x0010) != 0, injection = (u16 & 0x0040) != 0;
+              id(sw_boost)->publish_state(boost);
+              id(sw_injection)->publish_state(injection);
+              pubb(id(injection_ph), injection);
+            }
+            break;
+          case 0x51: id(regulation_ph)->publish_state(x[d] != 0); break;
+          case 0x0E: pub(id(heures_fonct), u16); break;
+          case 0x0F: pub(id(minutes_fonct), u16); break;
+          case 0x11: pubn(id(consigne_vol), u16); break;
+          case 0x12:
+            if (len >= 4) {
+              snprintf(buf, sizeof(buf), "%02u/%02u/20%02u", x[d + 1], x[d + 2], x[d + 3]);
+              pubt(id(date_etal_ph), buf);
+            }
+            break;
+          case 0x30: pubn(id(consigne_ph), x[d] / 10.0f); break;
+          case 0x32: pubn(id(consigne_acide), x[d]); break;
+          case 0x33: pubn(id(consigne_prod), x[d]); break;
+          case 0x39: pubn(id(consigne_inversion), x[d]); break;
+          case 0x95:
+            if (len >= 4) {
+              uint32_t v = ((uint32_t) x[d] << 24) | ((uint32_t) x[d + 1] << 16) | ((uint32_t) x[d + 2] << 8) | x[d + 3];
+              pubt(id(id_code), std::to_string(v));
+            }
+            break;
+          case 0x96:
+            if (len >= 2) {
+              snprintf(buf, sizeof(buf), "%02X.%02X", x[d], x[d + 1]);
+              pubt(id(version_soft), buf);
+            }
+            break;
+          case 0xB0: pub(id(rssi_vu_par_electrolyseur), -(float) x[d]); break;
+          case 0x99:
+          case 0x9A: {
+            std::string s(x.begin() + d, x.begin() + d + len);
+            s.erase(std::find(s.begin(), s.end(), '\0'), s.end());
+            pubt(key == 0x99 ? id(nom_bt) : id(num_serie), s);
+          } break;
+          default:
+            ESP_LOGV("justsalt", "ID 0x%02X non décodé (%u octets)", key, len);
+        }
+        i = d + len;
+      }
+      return n;
