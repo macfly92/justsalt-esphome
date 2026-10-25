@@ -1,6 +1,6 @@
 # Protocole Bluetooth JustSalt
 
-Notes de rétro-ingénierie, observées sur un **JustSalt Duo de 4e génération** (`GEN_V4`, logiciel 03.03, sans sonde ORP). Elles complètent le décodage publié sur le [forum HACF](https://forum.hacf.fr/t/electrolyseur-e-pool-technologie-justsalt/24718). Les commandes marquées ✅ ont été vérifiées par capture de l'application officielle (journal HCI Android) et/ou testées depuis l'ESP. Les interprétations marquées « ? » sont des hypothèses.
+Notes de rétro-ingénierie, observées sur un **JustSalt Duo de 4e génération** (`GEN_V4`, logiciel 03.03, sans sonde ORP). Elles complètent le décodage publié sur le forum HACF ([premier fil](https://forum.hacf.fr/t/electrolyseur-e-pool-technologie-justsalt/24718), [fil actuel](https://forum.hacf.fr/t/electrolyser-bluetooth-justsalt-racer/81540)). Les observations reprises de ce dernier sont signalées « (forum) ». Les commandes marquées ✅ ont été vérifiées par capture de l'application officielle (journal HCI Android) et/ou testées depuis l'ESP. Les interprétations marquées « ? » sont des hypothèses.
 
 ## Liaison Bluetooth
 
@@ -53,29 +53,33 @@ R = lecture, W = écriture (même ID), C = commande en écriture seule.
 | `01` | 1 | R | pH × 10 (72 = 7,2) |
 | `02` | 2 | R | pH × 100 (720 = 7,20), plus précis que `01` |
 | `03` | 1 | R | Production effective en % : égale à la consigne, **125 en boost** |
-| `05` | 2 | R | Compteur d'heures (?), proche de `0E` |
+| `05` | 2 | R | Heures totales de fonctionnement, apparu avec le logiciel 03.03 (forum). Sur le Duo testé, `0E` continue aussi de compter |
 | `08` | 1 | R | ? (100) |
 | `09` | 2 | R | Température de l'eau × 10 (°C) |
 | `0A` | 1 | R | Sel × 10 (g/L) ; **0 = pas de mesure** (cellule à l'arrêt) |
-| `0B` | 1 | R | Lié à la production (?) : 0 à l'arrêt, ~37 en production, augmente avec le % de production |
-| `0C` | 1 | R | Lié à la production : 0 à l'arrêt, ~90-100 en production |
+| `0B` | 1 | R | Lié à la production : 0 à l'arrêt, ~37 en production, décroît lentement après l'arrêt (grandeur filtrée ou thermique ?) |
+| `0C` | 1 | R | Courant ou production instantanée de la cellule (?) : 0 à l'arrêt, ~90-150 en production |
 | `0D` | 2 | R | ? |
 | `0E` | 2 | R | Heures de fonctionnement |
 | `0F` | 2 | R | Compteur incrémenté chaque minute |
 | `10` | 2 | R | ? |
 | `12` | 4 | R | Date d'étalonnage pH : `xx JJ MM AA` |
-| `1F` | 2 | R | ? (oscille en permanence) |
-| `28` | 2 | R | Sel en mg/L (4600 = 4,6 g/L) ; 0 = pas de mesure |
+| `1F` | 2 | R | Température de l'eau en °F × 10 (forum ; vérifié : 620 = 62,0 °F ≈ 16,7 °C pour 17,0 °C en `09`) |
+| `28` | 2 | R | Sel en mg/L, soit ppm (4600 = 4,6 g/L) ; 0 = pas de mesure |
+| `29` | 1 | R | Unité d'affichage du sel : 3 = g/L, sinon ppm (forum) |
+| `2A` | 1 | R | Unité d'affichage de la température : 1 = °C, sinon °F (forum) |
 | `67` | 2 | R | **Temps restant du boost** (minutes), 0 hors boost ✅ |
+| `90` | 8 | R | Alarmes (forum) : `…20` = alarme injection pH ; valeurs relevées 2 = manque d'eau, 40 = étalonnage pH |
 | `92` | 1 | R | Code d'événement transitoire, remis à 0 après environ 1 s : `07` boost, `09` injection manuelle, `0B` régulation réactivée |
-| `93` | 2 | R | **Registre d'état** ✅ : `0x0080` au repos, bit `0x0010` = boost en cours, bit `0x0040` = injection pH- en cours |
+| `93` | 2 | R | **Registre d'état** ✅ : bit `0x0010` = boost en cours, bit `0x0040` = injection pH- en cours. Bit `0x0080` présent en permanence sur le Duo testé, associé à l'électrolyse sur un autre modèle (forum) ; bit `0x0100` vu au démarrage de la pompe (forum) |
 | `95` | 4 | R | Code ID / configuration (change avec certains réglages) |
 | `96` | 2 | R | Version logicielle (`03 03`) |
 | `99` | 22 | R | Nom Bluetooth (ASCII) |
 | `9A` | 16 | R | Numéro de série (ASCII) |
-| `B0` | 1 | R | Signal reçu par l'électrolyseur (−dBm, envoyé chaque seconde) (?) |
+| `B0` | 1 | R | Signal Bluetooth reçu par l'électrolyseur (−dBm, envoyé chaque seconde) (?) : ~67-70 ici à quelques mètres, 42-57 relevé sur le forum à moins de 3 m, et insensible à l'arrêt de la cellule |
 | `B1` | 6 | R | Adresse Bluetooth de l'électrolyseur |
 | `D0` | 6 | R | Statut de la dernière commande : `[ID] [état] 00…`. Pour `6B` : `00` en cours, `01` en pause, `02` annulée, `03` terminée |
+| `D1` | 1 | R | Version du protocole : 5 avec le logiciel 02.05, 6 avec le 03.03 (forum) |
 
 ### Consignes (lecture et écriture)
 
@@ -106,7 +110,7 @@ R = lecture, W = écriture (même ID), C = commande en écriture seule.
 ## Historique (trames de type 02)
 
 Enregistrements de 15 octets, commençant par une date `AA MM JJ hh mm ss` :
-- **`E1`** : événement daté. Il contient un mot d'état au même format que `93` : l'alternance `00 C0` / `00 80` correspond aux impulsions d'injection de pH-.
+- **`E1`** : événement daté. Il contient un mot d'état au même format que `93` : l'alternance `00 C0` / `00 80` correspond aux impulsions d'injection de pH-. D'après le forum, dans l'octet de données 8, le bit 0 = volet fermé et le bit 2 = absence de débit.
 - **`E2`** : bilan quotidien (?) : durée de filtration du jour (h) et compteur cumulé.
 - **`E4`** : relevé horaire (?) : pH × 10, puis des grandeurs liées à la température et à la production.
 - **`E3`**, **`E5`** : non identifiés.
