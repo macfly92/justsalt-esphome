@@ -25,7 +25,7 @@ D'autres générations ou modèles (avec sonde ORP notamment) utilisent le même
 - Boost : état et temps restant
 - Consignes, heures de fonctionnement, date d'étalonnage pH, version, numéro de série
 - **Alarmes** : manque d'eau, injection pH, étalonnage pH, plus une alarme générale et la valeur brute du registre (correspondance des bits reprise du forum, à confirmer sur d'autres modèles)
-- Diagnostic : courant de cellule (estimé), signal Bluetooth (des deux côtés), signal Wi-Fi, réception des données
+- Diagnostic : courant de cellule (estimé), signal Bluetooth (des deux côtés), signal Wi-Fi, réception des données, appairages mémorisés
 
 **Commandes**
 - Consigne pH, consigne de production, taux d'acide, volume de la piscine, période d'inversion
@@ -53,11 +53,13 @@ L'électrolyseur exige un appairage Bluetooth chiffré, et **n'accepte qu'un seu
 Une fois appairé, la liaison survit aux redémarrages de l'ESP et aux coupures de l'électrolyseur (par exemple quand il est alimenté avec la filtration). Le log affiche à chaque connexion et déconnexion le nombre d'appairages mémorisés.
 
 **Si vous écrivez votre propre configuration**, trois points ont été déterminants :
-- **ne pas déclencher d'appairage depuis l'ESP** (pas de `pair()` dans `on_connect`). L'électrolyseur réclame lui-même la sécurisation à chaque connexion, et un appairage lancé en parallèle donne des appairages non persistants : `Deleting unpaired device` à la déconnexion, puis impossibilité de se reconnecter sans refaire l'appairage ;
+- **ne pas lancer d'appairage depuis l'ESP dès la connexion** (pas de `pair()` immédiat dans `on_connect`). L'électrolyseur réclame normalement lui-même la sécurisation, et un appairage lancé en parallèle donne des appairages non persistants : `Deleting unpaired device` à la déconnexion, puis impossibilité de se reconnecter sans refaire l'appairage. La configuration fournie ne tente qu'un **chiffrement de secours différé de 3 s**, avec la clé déjà mémorisée, si l'électrolyseur n'a rien demandé (cas observé après une remise sous tension) ;
 - `esp32_ble: auth_req_mode: sc_bond`, pour demander un appairage mémorisé ;
 - dans les logs, `mode = 8` signifie appairage **temporaire** : l'électrolyseur n'envoie rien et coupe au bout d'environ 10 s. Il faut `mode = 9`.
 
 Pour réappairer proprement : bouton **« Oublier l'appairage Bluetooth »**, puis mode appairage sur le boîtier.
+
+Deux capteurs de diagnostic aident à comprendre une perte d'appairage sans surveiller les logs : **« Appairages mémorisés au démarrage »** (clés présentes dans l'ESP après un redémarrage) et **« Appairages mémorisés »** (mis à jour à chaque connexion et déconnexion). Dans les logs, « Chiffrement refusé : l'électrolyseur ne reconnaît plus la clé » signale qu'un réappairage est nécessaire.
 
 ## Conseils Home Assistant
 

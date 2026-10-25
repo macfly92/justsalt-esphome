@@ -16,9 +16,14 @@ esphome:
   name: justsalt
   friendly_name: Électrolyseur
   on_boot:
-    priority: -100   # une fois la pile Bluetooth démarrée
+    priority: -100
     then:
       # Diagnostic : l'ESP a-t-il conservé sa clé d'appairage après le redémarrage ?
+      # On attend que la pile Bluetooth soit prête : avant, la lecture renvoie -1.
+      - wait_until:
+          condition:
+            lambda: "return esp_ble_get_bond_device_num() >= 0;"
+          timeout: 30s
       - lambda: |-
           int n = esp_ble_get_bond_device_num();
           ESP_LOGI("justsalt", "Au démarrage : %d appairage(s) mémorisé(s) dans l'ESP", n);
@@ -90,11 +95,12 @@ ble_client:
   - mac_address: ${mac_justsalt}
     id: justsalt
     auto_connect: true
-    # IMPORTANT : ne PAS déclencher d'appairage depuis l'ESP (pas de pair()).
-    # L'électrolyseur réclame lui-même la sécurisation à chaque connexion (Security
-    # Request) et ESPHome y répond automatiquement, comme le fait l'appli officielle.
-    # Un appairage lancé en parallèle par l'ESP provoquait des collisions et des
-    # appairages non persistants (« Deleting unpaired device » à la déconnexion).
+    # IMPORTANT : ne PAS lancer pair() dès la connexion. L'électrolyseur réclame
+    # normalement lui-même la sécurisation (Security Request) et ESPHome y répond
+    # automatiquement, comme l'appli officielle. Un appairage lancé en même temps par
+    # l'ESP provoquait des collisions et des appairages non persistants (« Deleting
+    # unpaired device » à la déconnexion). Seul un chiffrement de secours, différé de
+    # 3 s et avec la clé déjà mémorisée, est tenté si l'électrolyseur ne l'a pas demandé.
     on_connect:
       then:
         - lambda: |-
